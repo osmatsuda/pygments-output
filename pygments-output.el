@@ -39,43 +39,59 @@
   "Convert PYCODE to a shell command and execute the command.
 Return its output that chomped any newline and blank from start and end.
 If the output is blank, return nil."
-  (let ((command (concat "python -c "
-                         (shell-quote-argument pycode)))
-        (blanks (rx (or (group bos (+ (any "\n" blank)))
-                        (group (+ (any "\n" blank)) eos))))
-        result)
-    (setq result
-          (replace-regexp-in-string blanks ""
-                                    (shell-command-to-string command)))
-    (if (= (length result) 0)
-        nil
+  (let* ((command (concat "python -c " (shell-quote-argument pycode)))
+         (result (string-trim (shell-command-to-string command))))
+    (unless (string-empty-p result)
       result)))
 
 (defun pygments-output--all-lexers ()
-  "Return a list of lexer aliases made by pygments.lexers.get_all_lexers()."
+  "Return a list of lexer aliases."
   (or pygments-output-all-lexers
       (setq pygments-output-all-lexers
             (split-string (pygments-output--shell-commands-to-string
                            "from pygments.lexers import get_all_lexers
-print ' '.join([' '.join(v[1]) for v in get_all_lexers()])")))))
+lxrs = [' '.join(v[1]) for v in get_all_lexers()]
+print(' '.join(lxrs))")))))
 
 (defun pygments-output--all-formatters ()
-  "Return a list of formatter aliases.
-That is made by pygments.formatters.get_all_formatters()."
+  "Return a list of formatter aliases."
   (or pygments-output-all-formatters
       (setq pygments-output-all-formatters
             (split-string (pygments-output--shell-commands-to-string
                            "from pygments.formatters import get_all_formatters
-print ' '.join([' '.join(v.aliases) for v in get_all_formatters()])")))))
+fmts = [' '.join(v.aliases) for v in get_all_formatters()]
+print(' '.join(fmts))")))))
 
 (defun pygments-output--guessed-lexer-name ()
-  "Return a guessed lexer name from a current MODE-NAME."
-  (pygments-output--shell-commands-to-string
-   (concat "from pygments.lexers import get_lexer_by_name
+  "Return a lexer name guessed from the current region content,
+the current mode-name, or the buffer-file-name.
+Default value is `text'."
+  (or
+   (pygments-output--shell-commands-to-string
+    (concat "from pygments.lexers import guess_lexer
 try:
-    print get_lexer_by_name('" (format-mode-line mode-name) "').aliases[0]
+    print(guess_lexer(bytes(["
+	    (mapconcat #'number-to-string
+		       (encode-coding-string (buffer-substring-no-properties
+					      (region-beginning)
+					      (region-end))
+					     'utf-8)
+		       ",")
+	    "]).decode('utf-8')).aliases[0])
 except:
-    print ''")))
+    print('')"))
+   (pygments-output--shell-commands-to-string
+    (concat "from pygments.lexers import get_lexer_by_name
+try:
+    print(get_lexer_by_name('"
+	    (substring-no-properties (format-mode-line mode-name))
+	    "').aliases[0])
+except:
+    print('')"))
+   (when (buffer-file-name)
+     (string-trim (shell-command-to-string
+		   (concat "pygmentize -N " (buffer-file-name)))))
+   "text"))
 
 (defun pygments-output--component-by-name (name type)
   "Return (MODULE . CLASS-NAME).
@@ -83,37 +99,36 @@ NAME may be a member of all-lexers or all-formatters.
 TYPE should be a symbol: 'lexer or 'formatter."
   (unless (symbolp type)
     (error "TYPE should be a symbol"))
-  (let ((result
-         (pygments-output--shell-commands-to-string
-          (concat "from pygments." (symbol-name type) "s import "
-                  "get_" (symbol-name type) "_by_name
+  (let* ((fn-name (concat "get_" (symbol-name type) "_by_name"))
+	 (result
+          (pygments-output--shell-commands-to-string
+           (concat "from pygments." (symbol-name type) "s import " fn-name "
 try:
-    cmp = get_" (symbol-name type) "_by_name('" name "')
-    print cmp.__class__.__module__, cmp.__class__.__name__
+    cmp = " fn-name "('" name "')
+    print(cmp.__class__.__module__, cmp.__class__.__name__)
 except:
-    print ''"))))
+    print('')"))))
     (unless result
       (error "No %s component for %s" (upcase (symbol-name type)) name))
     (apply #'cons (split-string result " "))))
 
 (defun pygments-output--file-ext-of-last-formatter ()
-  "Return the mode symbol from `auto-mode-alist'. Return nil when `pygments-output-last-formatter-alias' is nil."
+  "Return a file extension which the last used formatter can produce.
+Return nil the formatter produces none."
   (let ((result (pygments-output--shell-commands-to-string
                  (concat "from pygments.formatters import get_formatter_by_name
 try:
-    filenames =  get_formatter_by_name('"
+    filenames = get_formatter_by_name('"
                          pygments-output-last-formatter-alias
                          "').filenames
-    print filenames and filenames[0] or ''
+    print(filenames and filenames[0] or '')
 except:
-    print ''"))))
-    (if result
-        (substring result 2)
-      nil)))
+    print('')"))))
+    (when result
+      (substring result 2))))
 
 (defun pygments-output (start end)
-  "Show pygments-output:source mode with the current region.
-All tabs in the region are converted by `untabify'."
+  "Show pygments-output:source mode with the current region."
   (interactive "r")
   (when (= start end) (error "There is no region"))
   (let ((source-buffer (current-buffer))
@@ -128,23 +143,22 @@ All tabs in the region are converted by `untabify'."
       (pygments-output:source-mode)
       (setq lexer-name (completing-read
                         (concat "Lexer alias"
-                                (when (> (length lexer-name) 0)
+                                (unless (or (null lexer-name)
+					    (string-empty-p lexer-name))
                                   (concat " (default " lexer-name ")"))
                                 ": ")
                         (pygments-output--all-lexers)
-                        nil t nil nil lexer-name))
-      (setq lexer (pygments-output--component-by-name
-                   lexer-name 'lexer))
+                        nil t nil nil lexer-name)
+	    lexer (pygments-output--component-by-name lexer-name 'lexer))
       (setq formatter-name (completing-read
                             (concat "Formatter alias"
                                     (concat " (default " formatter-name ")")
                                     ": ")
                             (pygments-output--all-formatters)
-                            nil t nil nil formatter-name))
-      (setq formatter (pygments-output--component-by-name
-                       formatter-name 'formatter))
-      (setq pygments-output-last-formatter-alias formatter-name)
-      (setq pygments-output-source-buffer source-buffer)
+                            nil t nil nil formatter-name)
+	    formatter (pygments-output--component-by-name formatter-name 'formatter))
+      (setq pygments-output-last-formatter-alias formatter-name
+	    pygments-output-source-buffer source-buffer)
       (newline)
       (insert "from pygments import highlight")
       (newline)
@@ -164,7 +178,7 @@ All tabs in the region are converted by `untabify'."
                                             str)))
               "\"\"\"")
       (newline 2)
-      (insert "print highlight(code, " (cdr lexer) "(), " (cdr formatter) "())")
+      (insert "print(highlight(code, " (cdr lexer) "(), " (cdr formatter) "()))")
       (newline))
     (select-window (display-buffer pyg-buffer))))
 
@@ -198,26 +212,37 @@ Then show the formattered result in *Pygments Result* buffer."
 (defun pygments-output-undo ()
   "Back to *Pygments Source* buffer from *Pygments Result* buffer."
   (interactive)
-  (let ((pyg-buffer (get-buffer "*Pygments Source*"))
-	(result-buffer (get-buffer "*Pygments Result*"))
-	(source-buffer pygments-output-source-buffer))
+  (let ((pyg-buffer (get-buffer "*Pygments Source*")))
     (if pyg-buffer
 	(unless (eq (current-buffer) pyg-buffer)
 	  (switch-to-buffer pyg-buffer))
       (pygments-output-quit))))
 
-(defun pygments-output-save ()
-  "Save the contents of *Pygments Result* to the kill ring by `kill-new'."
+(defun pygments-output-kill-ring-save ()
+  "Save the content of *Pygments Result* to the kill ring by `kill-new'."
   (interactive)
   (unless (eq (current-buffer) (get-buffer "*Pygments Result*"))
-    (error "Executed on wrong buffer: %s" (buffer-name)))
-  (and (when (> (buffer-size) 0)
-	 (kill-new (buffer-string))
-	 (message "Saved kill-ring: %s..."
-		  (substring-no-properties (car kill-ring) 0
-					   (min 25 (length (car kill-ring)))))
-	 t)
-       (pygments-output-quit)))
+    (error "Executed on a wrong buffer: %s" (buffer-name)))
+  (when (> (buffer-size) 0)
+    (kill-new (buffer-string))
+    (message "Saved kill-ring: %s..."
+	     (substring-no-properties (car kill-ring) 0
+				      (min 25 (length (car kill-ring))))))
+  (pygments-output-quit))
+
+(defun pygments-output-save-file ()
+  "Save the content of *Pygments Result* to a file."
+  (interactive)
+  (let ((pyg-result (get-buffer "*Pygments Result*")))
+    (unless (eq (current-buffer) pyg-result)
+      (error "Executed on a wrong buffer: %s" (buffer-name)))
+    (with-temp-buffer
+      (erase-buffer)
+      (insert (with-current-buffer pyg-result
+                (buffer-substring-no-properties (point-min) (point-max))))
+      (basic-save-buffer)
+      (kill-buffer))
+    (pygments-output-quit)))
 
 (defun pygments-output-quit ()
   "Kill *Pygments Source* and *Pygments Result* buffer, then back to the buffer
@@ -253,7 +278,6 @@ that you would highlight by pygments."
                 (propertize "Quit" 'face 'font-lock-type-face))))
 
 (define-derived-mode pygments-output:result-mode special-mode "pygments-output:result"
-  "Docs"
   :group 'pygments-output
   (setq buffer-read-only nil)
   (let ((file-ext (pygments-output--file-ext-of-last-formatter))
@@ -267,7 +291,7 @@ that you would highlight by pygments."
       (`sgml-mode
        (require 'sgml-mode)
        (set-syntax-table (sgml-make-syntax-table sgml-specials))
-       (setq-local syntax-propertize-function sgml-syntax-propertize-function)
+       (setq-local syntax-propertize-function sgml-syntax-propertize-rules)
        (setq font-lock-defaults '((sgml-font-lock-keywords
                                    sgml-font-lock-keywords-1
                                    sgml-font-lock-keywords-2)))
@@ -283,13 +307,16 @@ that you would highlight by pygments."
     (use-local-map
      (let ((map (make-sparse-keymap)))
        (set-keymap-parent map parent-map)
-       (define-key map (kbd "C-c C-w") 'pygments-output-save)
+       (define-key map (kbd "C-c C-w") 'pygments-output-save-file)
+       (define-key map (kbd "C-c C-k") 'pygments-output-kill-ring-save)
        (define-key map (kbd "C-c C-l") 'pygments-output-undo)
        (define-key map (kbd "C-c C-q") 'pygments-output-quit)
        map)))
   (setq header-line-format
         (concat " C-c C-w: "
-                (propertize "Save" 'face 'font-lock-type-face)
+                (propertize "Save to" 'face 'font-lock-type-face)
+		", C-c C-k: "
+		(propertize "Kill new" 'face 'font-lock-type-face)
                 ", C-c C-l: "
                 (propertize "Undo" 'face 'font-lock-type-face)
                 ", C-c C-q: "
