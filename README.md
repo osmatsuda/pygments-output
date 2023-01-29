@@ -1,6 +1,6 @@
 # pygments-output
 
-Show formatted text by pygments (http://pygments.org) interactively.
+Show formatted text source highlighted by [pygments](http://pygments.org) interactively.
 
 ## Usege
 
