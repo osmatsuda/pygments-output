@@ -167,20 +167,44 @@ except:
       (insert "from " (car formatter) " import " (cdr formatter))
       (newline 2)
       (insert "code = \"\"\""
-              (replace-regexp-in-string "\"\\{3\\}"
-                                        "\\\\\"\\\\\"\\\\\""
-                                        (with-current-buffer source-buffer
-                                          (let (str)
-                                            (untabify start end)
-                                            (setq str
-                                                  (buffer-substring-no-properties
-                                                   start end))
-                                            str)))
+	      (pygments-output--escape
+	       (with-current-buffer source-buffer
+		 (untabify start end)
+		 (buffer-substring-no-properties start end)))
               "\"\"\"")
       (newline 2)
       (insert "print(highlight(code, " (cdr lexer) "(), " (cdr formatter) "()))")
       (newline))
     (select-window (display-buffer pyg-buffer))))
+
+(defun pygments-output--escape (src)
+  (let (dq-tri dq-tri-clone)
+    (concat
+     (vconcat
+      (cl-reduce #'(lambda (acm c)
+		     (pcase c
+		       (92
+			(if (null dq-tri)
+			    (vconcat acm (vector 92 92))
+			  (setq dq-tri-clone (cl-copy-list dq-tri))
+			  (setq dq-tri nil)
+			  (vconcat acm dq-tri-clone (vector 92 92))))
+		       (34
+			(if (= (length dq-tri) 2)
+			    (progn
+			      (setq dq-tri nil)
+			      (vconcat acm (vector 92 34 92 34 92 34)))
+			  (setq dq-tri (cons 34 dq-tri))
+			  acm))
+		       (_
+			(if (null dq-tri)
+			    (vconcat acm (vector c))
+			  (setq dq-tri-clone (cl-copy-list dq-tri))
+			  (setq dq-tri nil)
+			  (vconcat acm dq-tri-clone (vector c))))))
+		 (string-to-vector src)
+		 :initial-value [])
+      dq-tri))))
 
 (defun pygments-output-exec ()
   "Execute the contents of *Pygments Source* buffer.
